@@ -7,13 +7,13 @@ export async function Shell({ children }: { children: React.ReactNode }) {
   const user = await currentUser(true);
   return (
     <>
-      <nav className="siteNav v35Nav">
-        <div className="brandWrap"><Logo /><span className="versionBadge">3.5</span></div>
+      <nav className="siteNav">
+        <Logo />
         <div className="navLinks">
-          {user ? <Link href="/dashboard">Today</Link> : <Link href="/">Home</Link>}
-          {user && user.tier !== "free" && <Link href="/performance">Performance</Link>}
-          <Link href="/pricing">Membership</Link>
+          <Link href="/pricing">Pricing</Link>
+          {user && <Link href="/dashboard">Dashboard</Link>}
           {user && <Link href="/account">Account</Link>}
+          {user && user.tier !== "free" && <Link href="/performance">Performance</Link>}
           {user?.role === "admin" && <Link href="/live-odds">System Health</Link>}
           {user?.role === "admin" && <Link href="/admin">Admin</Link>}
         </div>
@@ -32,10 +32,10 @@ export async function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </nav>
       <main>{children}</main>
-      <footer className="footer v35Footer">
-        <div className="brandWrap"><Logo /><span className="versionBadge">3.5</span></div>
-        <p>Market-aware analytics. Transparent records. No guarantees.</p>
-        <div><Link href="/pricing">Membership</Link><span>© 2026 EdgeBoard</span></div>
+      <footer className="footer">
+        <Logo />
+        <p>Analytics, not guarantees. Bet responsibly and only where legal.</p>
+        <div><Link href="/pricing">Pricing</Link><span>© 2026 EdgeBoard</span></div>
       </footer>
     </>
   );
