@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import "./v35.css";
 
 export const metadata: Metadata = {
-  title: { default: "EdgeBoard 3.5 — Sports Intelligence", template: "%s · EdgeBoard 3.5" },
+  title: { default: "EdgeBoard — Sports Intelligence", template: "%s · EdgeBoard" },
   description: "Transparent, tracked sports-betting analytics powered by market-aware modeling.",
   icons: { icon: "/favicon.svg" }
 };
