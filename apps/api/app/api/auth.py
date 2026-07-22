@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.invites import decode_invite_code
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models import User
 from app.schemas import AuthResponse, LoginRequest, RegisterRequest, UserOut
@@ -29,11 +30,17 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.scalar(select(User).where(User.email == email))
     if existing:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    invited_tier = decode_invite_code(payload.invite_code)
+    if payload.invite_code and invited_tier is None:
+        raise HTTPException(status_code=400, detail="That invite code is invalid or expired")
+
     user = User(
         email=email,
         password_hash=hash_password(payload.password),
         display_name=payload.display_name.strip(),
         is_admin=email == settings.admin_email.lower(),
+        subscription_tier=invited_tier or "free",
     )
     db.add(user)
     db.commit()

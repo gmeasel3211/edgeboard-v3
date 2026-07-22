@@ -10,6 +10,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(default="", max_length=80)
+    invite_code: str | None = Field(default=None, max_length=500)
 
 
 class LoginRequest(BaseModel):
@@ -55,3 +56,16 @@ class PickOut(BaseModel):
 
 class CheckoutRequest(BaseModel):
     tier: SubscriptionTier
+
+
+class InviteCodeRequest(BaseModel):
+    tier: SubscriptionTier
+    days_valid: int = Field(default=30, ge=1, le=365)
+    label: str = Field(default="Friend beta access", max_length=80)
+
+
+class InviteCodeResponse(BaseModel):
+    code: str
+    tier: SubscriptionTier
+    expires_at: datetime
+    label: str

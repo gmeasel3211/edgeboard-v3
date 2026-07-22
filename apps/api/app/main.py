@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, auth, billing, games, picks, system
+from app.api import admin, auth, billing, games, invites, picks, system
 from app.core.config import settings
 from app.services.scheduler import start_scheduler, stop_scheduler
 
@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="3.1.0",
+    version="3.2.0",
     description="EdgeBoard commercial MLB intelligence API",
     lifespan=lifespan,
 )
@@ -37,8 +37,9 @@ app.include_router(games.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")
 app.include_router(billing.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
+app.include_router(invites.router, prefix="/api/v1")
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "edgeboard-api", "version": "3.1.0"}
+    return {"status": "ok", "service": "edgeboard-api", "version": "3.2.0"}

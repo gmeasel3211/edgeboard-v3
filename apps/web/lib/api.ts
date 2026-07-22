@@ -1,6 +1,8 @@
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+export type PlanView = "actual" | "free" | "pro" | "elite";
+
 export type Pick = {
   id?: number;
   game_id?: string;
@@ -20,10 +22,24 @@ export type Pick = {
   starts_at: string;
 };
 
+export function getPlanView(): PlanView {
+  if (typeof window === "undefined") return "actual";
+  return (localStorage.getItem("edgeboard_view_as") as PlanView) || "actual";
+}
+
+export function setPlanView(view: PlanView) {
+  localStorage.setItem("edgeboard_view_as", view);
+  window.dispatchEvent(new Event("edgeboard-view-change"));
+}
+
 export function authHeaders(): HeadersInit {
   if (typeof window === "undefined") return {};
   const token = localStorage.getItem("edgeboard_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const view = getPlanView();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (view !== "actual") headers["X-EdgeBoard-View-As"] = view;
+  return headers;
 }
 
 export async function getFreePick(): Promise<Pick | null> {

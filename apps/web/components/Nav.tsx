@@ -11,16 +11,14 @@ export function Nav() {
     const token = localStorage.getItem("edgeboard_token");
     if (!token) return;
     fetch(`${API_URL}/api/v1/auth/me`, { headers: authHeaders() })
-      .then(async response => {
-        if (!response.ok) return null;
-        return response.json();
-      })
+      .then(async response => response.ok ? response.json() : null)
       .then(setUser)
       .catch(() => setUser(null));
   }, []);
 
   function logout() {
     localStorage.removeItem("edgeboard_token");
+    localStorage.removeItem("edgeboard_view_as");
     window.location.href = "/";
   }
 
