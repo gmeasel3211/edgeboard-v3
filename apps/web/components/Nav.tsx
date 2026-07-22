@@ -6,10 +6,11 @@ export function Nav() {
       <div className="container nav-inner">
         <Link href="/" className="brand">Edge<span>Board</span></Link>
         <div className="nav-links">
+          <Link href="/dashboard">Card</Link>
+          <Link href="/games">Games</Link>
+          <Link href="/live-odds">Live Odds</Link>
           <Link href="/pricing">Pricing</Link>
-          <Link href="/dashboard">Dashboard</Link>
           <Link href="/login" className="button">Log in</Link>
-          <Link href="/register" className="button primary">Start free</Link>
         </div>
       </div>
     </nav>

@@ -23,7 +23,6 @@ class UserOut(BaseModel):
     display_name: str
     is_admin: bool
     subscription_tier: SubscriptionTier
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -36,12 +35,14 @@ class AuthResponse(BaseModel):
 class PickOut(BaseModel):
     id: int
     sport: str
+    game_id: str
     matchup: str
     market: str
     selection: str
     sportsbook: str
     american_odds: int
     model_probability: float
+    market_probability: float
     edge_percent: float
     expected_value_percent: float
     confidence: float
@@ -49,7 +50,6 @@ class PickOut(BaseModel):
     status: str
     explanation: str
     starts_at: datetime
-
     model_config = ConfigDict(from_attributes=True)
 
 

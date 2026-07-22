@@ -1,90 +1,53 @@
-# EdgeBoard v3
+# EdgeBoard v3 — Milestone 2
 
-Commercial-ready sports analytics SaaS foundation.
+Milestone 2 turns the deployable SaaS foundation into a live MLB data platform.
 
-## Included
+## Added in this milestone
 
-- Next.js subscriber-facing frontend
-- FastAPI backend
-- PostgreSQL-ready database layer
-- JWT authentication
-- Stripe subscription scaffolding
-- Admin-protected API routes
-- MLB game board with demo fallback data
-- Render Blueprint deployment
-- Docker Compose for local development
-- GitHub Actions checks
+- The Odds API v4 integration
+- FanDuel and DraftKings filtering
+- Moneyline, spread, and total snapshots
+- Persistent historical odds storage
+- MLB schedule, standings, probable pitchers, scores, and season pitching statistics
+- National Weather Service hourly forecasts for outdoor parks
+- MLB stadium coordinates, roof status, and baseline park factors
+- Automated refresh pipeline
+- APScheduler refresh loop
+- Market-aware moneyline projection
+- No-vig probability calculation
+- Edge, EV, confidence, and fractional Kelly sizing
+- Subscriber game board
+- Game-detail pages
+- Live pipeline status
+- Administrator refresh center
 
-## Repository structure
+## Important limitation
 
-```text
-apps/
-  api/   FastAPI backend
-  web/   Next.js frontend
-render.yaml
-docker-compose.yml
-```
+This milestone creates a real data and modeling pipeline, but it is not yet a validated betting model.
+Do not market projections as guaranteed or proven. Milestone 3 will add calibration, backtesting,
+bet grading, closing-line tracking, expanded markets, and performance analytics.
 
-## Local setup
+## Update an existing Milestone 1 repository
 
-1. Copy `.env.example` to `.env`.
-2. Start PostgreSQL:
+Replace the old repository files with the contents of this package, or copy these files over the
+existing project and allow matching files to be overwritten. Commit and push to `main`.
+Render will redeploy automatically from the updated `render.yaml`.
 
-```bash
-docker compose up db -d
-```
+## Required Render environment variables
 
-3. Start API:
+- `ADMIN_EMAIL`
+- `ODDS_API_KEY`
+- `NWS_USER_AGENT` — example: `EdgeBoard/3.1 (you@example.com)`
 
-```bash
-cd apps/api
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+Stripe variables can remain blank until billing is configured.
 
-4. Start web app:
+## First live refresh
 
-```bash
-cd apps/web
-npm install
-npm run dev
-```
+After deployment:
 
-Frontend: http://localhost:3000  
-API docs: http://localhost:8000/docs
+1. Register using `ADMIN_EMAIL`.
+2. Visit `/admin`.
+3. Click **Full refresh**.
+4. Visit `/live-odds` and `/games`.
 
-## First administrator
-
-Set `ADMIN_EMAIL` in the API environment. Register an account using that email.
-The API automatically grants that account administrator privileges.
-
-## Stripe
-
-Create recurring Stripe prices and set:
-
-- `STRIPE_SECRET_KEY`
-- `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRO_PRICE_ID`
-- `STRIPE_ELITE_PRICE_ID`
-
-Webhook endpoint:
-
-```text
-/api/v1/billing/webhook
-```
-
-## Render deployment
-
-Commit this project to the root of a GitHub repository. In Render choose:
-
-**New → Blueprint → select repository**
-
-Render reads `render.yaml` and creates:
-
-- PostgreSQL database
-- FastAPI web service
-- Next.js web service
-
-After deployment, set the frontend `NEXT_PUBLIC_API_URL` to the public API URL if Render does not resolve it automatically.
+The scheduled refresh then runs every 10 minutes while the API service is awake.

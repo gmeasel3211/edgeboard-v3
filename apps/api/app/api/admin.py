@@ -1,29 +1,39 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.api.deps import admin_user
 from app.core.database import get_db
-from app.models import Pick, User
-from app.services.mlb import demo_board
+from app.models import User
+from app.services.pipeline import RefreshPipeline
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+pipeline = RefreshPipeline()
 
 
-@router.post("/refresh")
-def refresh_board(
-    db: Session = Depends(get_db),
-    _: User = Depends(admin_user),
-):
-    db.execute(delete(Pick))
-    for item in demo_board():
-        db.add(Pick(sport="MLB", status="pending", **item))
-    db.commit()
-    return {"ok": True, "message": "MLB board refreshed", "count": 4}
+@router.post("/refresh/full")
+async def refresh_full(_: User = Depends(admin_user)):
+    return {"ok": True, "results": await pipeline.run_full()}
 
 
-@router.get("/health")
-def admin_health(_: User = Depends(admin_user)):
-    return {"api": "ok", "database": "ok", "model": "demo-ready"}
+@router.post("/refresh/mlb")
+async def refresh_mlb(_: User = Depends(admin_user)):
+    return {"ok": True, "results": await pipeline.refresh_mlb()}
+
+
+@router.post("/refresh/odds")
+async def refresh_odds(_: User = Depends(admin_user)):
+    result = await pipeline.refresh_odds()
+    model = pipeline.rebuild_card()
+    return {"ok": True, "results": result, "model": model}
+
+
+@router.post("/refresh/weather")
+async def refresh_weather(_: User = Depends(admin_user)):
+    return {"ok": True, "results": await pipeline.refresh_weather()}
+
+
+@router.post("/rebuild-card")
+def rebuild_card(_: User = Depends(admin_user)):
+    return {"ok": True, "results": pipeline.rebuild_card()}

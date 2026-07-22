@@ -32,6 +32,22 @@ services:
         sync: false
       - key: ODDS_API_KEY
         sync: false
+      - key: ODDS_REGIONS
+        value: us
+      - key: ODDS_BOOKMAKERS
+        value: fanduel,draftkings
+      - key: ODDS_MARKETS
+        value: h2h,spreads,totals
+      - key: MLB_STATS_BASE_URL
+        value: https://statsapi.mlb.com/api
+      - key: NWS_BASE_URL
+        value: https://api.weather.gov
+      - key: NWS_USER_AGENT
+        sync: false
+      - key: AUTO_REFRESH_ENABLED
+        value: true
+      - key: ODDS_REFRESH_MINUTES
+        value: 10
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
