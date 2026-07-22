@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import decode_access_token
-from app.models import SubscriptionTier, User
+from app.models import User
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -31,6 +31,6 @@ def admin_user(user: User = Depends(current_user)) -> User:
 
 
 def subscriber_user(user: User = Depends(current_user)) -> User:
-    if user.subscription_tier == SubscriptionTier.FREE and not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Paid subscription required")
+    # Alpha access: every authenticated account can view the board.
+    # Paid-tier enforcement returns when Stripe subscriptions are enabled.
     return user

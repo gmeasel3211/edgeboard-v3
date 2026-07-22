@@ -14,6 +14,15 @@ from app.schemas import AuthResponse, LoginRequest, RegisterRequest, UserOut
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+def sync_admin_status(user: User, db: Session) -> None:
+    should_be_admin = user.email.lower() == settings.admin_email.lower()
+    if user.is_admin != should_be_admin:
+        user.is_admin = should_be_admin
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     email = payload.email.lower()
@@ -37,9 +46,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
+    sync_admin_status(user, db)
     return AuthResponse(access_token=create_access_token(user.id), user=user)
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(current_user)):
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    sync_admin_status(user, db)
     return user

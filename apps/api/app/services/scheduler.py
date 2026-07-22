@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
     )
     scheduler.start()
 
