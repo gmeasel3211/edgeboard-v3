@@ -1,45 +1,45 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
 
-from app.api import admin, auth, billing, games, invites, picks, system
-from app.core.config import settings
-from app.services.scheduler import start_scheduler, stop_scheduler
+from .api.router import api_router
+from .config import get_settings
+from .db import Base, engine
+from .middleware import SecurityHeadersMiddleware
+
+settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    start_scheduler()
+async def lifespan(_: FastAPI):
+    if not settings.is_production:
+        Base.metadata.create_all(bind=engine)
     yield
-    stop_scheduler()
 
 
 app = FastAPI(
-    title=settings.app_name,
-    version="3.2.0",
-    description="EdgeBoard commercial MLB intelligence API",
+    title="EdgeBoard API",
+    version=settings.model_version,
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
+    default_response_class=ORJSONResponse,
     lifespan=lifespan,
 )
-
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Cron-Secret", "Stripe-Signature"],
 )
-
-app.include_router(auth.router, prefix="/api/v1")
-app.include_router(picks.router, prefix="/api/v1")
-app.include_router(games.router, prefix="/api/v1")
-app.include_router(system.router, prefix="/api/v1")
-app.include_router(billing.router, prefix="/api/v1")
-app.include_router(admin.router, prefix="/api/v1")
-app.include_router(invites.router, prefix="/api/v1")
+app.include_router(api_router, prefix=settings.api_prefix)
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "edgeboard-api", "version": "3.2.0"}
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok", "service": "edgeboard-api", "version": settings.model_version}

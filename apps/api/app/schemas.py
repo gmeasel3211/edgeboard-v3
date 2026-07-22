@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any, Literal
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models import SubscriptionTier
+
+class Message(BaseModel):
+    message: str
 
 
-class RegisterRequest(BaseModel):
+class UserCreate(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
-    display_name: str = Field(default="", max_length=80)
-    invite_code: str | None = Field(default=None, max_length=500)
+    display_name: str = Field(min_length=2, max_length=120)
+    password: str = Field(min_length=12, max_length=200)
 
 
 class LoginRequest(BaseModel):
@@ -18,54 +21,92 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordReset(BaseModel):
+    token: str
+    password: str = Field(min_length=12, max_length=200)
+
+
+class VerifyEmail(BaseModel):
+    token: str
+
+
 class UserOut(BaseModel):
-    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
     email: EmailStr
     display_name: str
-    is_admin: bool
-    subscription_tier: SubscriptionTier
-    model_config = ConfigDict(from_attributes=True)
+    role: str
+    tier: str
+    is_verified: bool
+    is_active: bool
+    created_at: datetime
 
 
 class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
     user: UserOut
-
-
-class PickOut(BaseModel):
-    id: int
-    sport: str
-    game_id: str
-    matchup: str
-    market: str
-    selection: str
-    sportsbook: str
-    american_odds: int
-    model_probability: float
-    market_probability: float
-    edge_percent: float
-    expected_value_percent: float
-    confidence: float
-    units: float
-    status: str
-    explanation: str
-    starts_at: datetime
-    model_config = ConfigDict(from_attributes=True)
+    csrf_token: str
 
 
 class CheckoutRequest(BaseModel):
-    tier: SubscriptionTier
+    plan: Literal["pro", "elite"]
 
 
-class InviteCodeRequest(BaseModel):
-    tier: SubscriptionTier
-    days_valid: int = Field(default=30, ge=1, le=365)
-    label: str = Field(default="Friend beta access", max_length=80)
+class CheckoutResponse(BaseModel):
+    url: str
 
 
-class InviteCodeResponse(BaseModel):
-    code: str
-    tier: SubscriptionTier
-    expires_at: datetime
-    label: str
+class SettingUpdate(BaseModel):
+    values: dict[str, Any]
+
+
+class AdminOperationRequest(BaseModel):
+    force_official: bool = False
+
+
+class PickOut(BaseModel):
+    id: str
+    game_id: str
+    card_date: date
+    matchup: str
+    commence_time: datetime
+    market: str
+    selection: str
+    line: float | None
+    bookmaker: str
+    price: int
+    model_probability: float
+    market_probability: float
+    fair_odds: int
+    edge: float
+    expected_value: float
+    confidence: float
+    data_quality: int
+    score: float
+    grade: str
+    units: float
+    is_official: bool
+    result: str | None
+    profit_units: float | None
+    clv: float | None
+    reasons: list[str]
+
+
+class DashboardResponse(BaseModel):
+    as_of: datetime
+    tier: str
+    record: dict[str, Any]
+    official: list[PickOut]
+    watchlist: list[PickOut]
+    games: list[dict[str, Any]]
+
+
+class PerformanceResponse(BaseModel):
+    summary: dict[str, Any]
+    daily: list[dict[str, Any]]
+    by_market: list[dict[str, Any]]
+    by_grade: list[dict[str, Any]]

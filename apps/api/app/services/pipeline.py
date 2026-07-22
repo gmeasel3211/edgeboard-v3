@@ -1,313 +1,573 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from time import perf_counter
 from collections import defaultdict
-from datetime import date, datetime, timezone
-from sqlalchemy import delete, select
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import delete, desc, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal
-from app.models import (
-    Game, OddsSnapshot, Pick, PitcherSnapshot, RefreshRun,
-    TeamSnapshot, WeatherSnapshot
-)
-from app.services.mlb_client import MLBStatsClient
-from app.services.model_engine import (
-    american_to_implied, evaluate_moneyline, no_vig_probabilities,
-    projected_home_probability
-)
-from app.services.odds_client import OddsClient
-from app.services.stadiums import STADIUMS
-from app.services.weather_client import NWSClient, parse_wind_speed
+from ..config import get_settings
+from ..models import Game, OperationLog, Projection, Quote, Recommendation
+from .grading import grade_official_picks
+from .math_utils import american_to_implied, no_vig_probabilities
+from .mlb import MLBClient
+from .model import ModelEngine
+from .odds import OddsClient
+from .parks import PARKS
+from .settings_service import get_policy
+from .weather import WeatherClient
+
+settings = get_settings()
+_ET = ZoneInfo("America/New_York")
+_PROCESS_LOCK = asyncio.Lock()
+_LOCK_ID = 337_003_001
+
+TEAM_ALIASES = {
+    "oakland athletics": "Athletics",
+    "athletics": "Athletics",
+    "tampa bay rays": "Tampa Bay Rays",
+}
 
 
-def parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+def canonical_team(name: str | None) -> str:
+    if not name:
+        return "Unknown"
+    return TEAM_ALIASES.get(name.strip().lower(), name.strip())
 
 
-def to_float(value, default=None):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+def game_key(game_date: date, away: str, home: str) -> str:
+    return f"mlb:{game_date.isoformat()}:{away.lower().replace(' ', '-')}:{home.lower().replace(' ', '-')}"
 
 
-class RefreshPipeline:
-    def __init__(self):
+class Pipeline:
+    def __init__(self) -> None:
         self.odds = OddsClient()
-        self.mlb = MLBStatsClient()
-        self.weather = NWSClient()
+        self.mlb = MLBClient()
+        self.weather = WeatherClient()
+        self.engine = ModelEngine(settings.model_simulations)
 
-    async def run_full(self) -> dict:
-        result = {}
-        result["mlb"] = await self.refresh_mlb()
-        result["odds"] = await self.refresh_odds()
-        result["weather"] = await self.refresh_weather()
-        result["model"] = self.rebuild_card()
-        return result
+    def _try_database_lock(self, db: Session) -> bool:
+        if db.bind and db.bind.dialect.name == "postgresql":
+            return bool(db.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _LOCK_ID}))
+        return True
 
-    async def refresh_mlb(self) -> dict:
-        run_id = self._start_run("mlb")
-        try:
-            season = date.today().year
-            schedule, standings = await self.mlb.schedule(), await self.mlb.standings(season)
-            pitcher_ids: dict[int, str] = {}
-            with SessionLocal() as db:
-                for payload in schedule:
-                    teams = payload.get("teams", {})
-                    home = teams.get("home", {}).get("team", {})
-                    away = teams.get("away", {}).get("team", {})
-                    venue = payload.get("venue", {})
-                    game_pk = payload.get("gamePk")
-                    external_id = f"mlb-{game_pk}"
-                    game = db.scalar(select(Game).where(Game.external_id == external_id)) or Game(external_id=external_id)
-                    game.mlb_game_pk = game_pk
-                    game.home_team = home.get("name", "")
-                    game.away_team = away.get("name", "")
-                    game.home_team_id = home.get("id")
-                    game.away_team_id = away.get("id")
-                    game.venue_name = venue.get("name", "")
-                    game.venue_id = venue.get("id")
-                    game.starts_at = parse_dt(payload.get("gameDate")) or datetime.now(timezone.utc)
-                    game.status = payload.get("status", {}).get("detailedState", "scheduled")
-                    home_pitcher = teams.get("home", {}).get("probablePitcher", {})
-                    away_pitcher = teams.get("away", {}).get("probablePitcher", {})
-                    game.home_probable_pitcher_id = home_pitcher.get("id")
-                    game.home_probable_pitcher = home_pitcher.get("fullName", "")
-                    game.away_probable_pitcher_id = away_pitcher.get("id")
-                    game.away_probable_pitcher = away_pitcher.get("fullName", "")
-                    if game.home_probable_pitcher_id:
-                        pitcher_ids[game.home_probable_pitcher_id] = game.home_probable_pitcher
-                    if game.away_probable_pitcher_id:
-                        pitcher_ids[game.away_probable_pitcher_id] = game.away_probable_pitcher
-                    game.home_score = teams.get("home", {}).get("score")
-                    game.away_score = teams.get("away", {}).get("score")
-                    game.source_updated_at = datetime.now(timezone.utc)
-                    db.add(game)
+    def _release_database_lock(self, db: Session) -> None:
+        if db.bind and db.bind.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _LOCK_ID})
 
-                captured = date.today().isoformat()
-                for record in standings:
-                    team = record.get("team", {})
-                    games_played = max(int(record.get("gamesPlayed", 0) or 0), 1)
-                    runs_scored = int(record.get("runsScored", 0) or 0)
-                    runs_allowed = int(record.get("runsAllowed", 0) or 0)
-                    snap = db.scalar(select(TeamSnapshot).where(
-                        TeamSnapshot.team_id == team.get("id"),
-                        TeamSnapshot.season == season,
-                        TeamSnapshot.captured_date == captured,
-                    )) or TeamSnapshot(team_id=team.get("id"), season=season, captured_date=captured)
-                    snap.team_name = team.get("name", "")
-                    snap.wins = int(record.get("wins", 0) or 0)
-                    snap.losses = int(record.get("losses", 0) or 0)
-                    snap.runs_per_game = runs_scored / games_played
-                    snap.runs_allowed_per_game = runs_allowed / games_played
-                    snap.run_differential_per_game = (runs_scored - runs_allowed) / games_played
-                    snap.raw = record
-                    db.add(snap)
-                db.commit()
-
-            pitcher_count = 0
-            for pitcher_id, name in pitcher_ids.items():
-                stats = await self.mlb.pitcher_stats(pitcher_id, season)
-                if not stats:
-                    continue
-                with SessionLocal() as db:
-                    captured = date.today().isoformat()
-                    snap = db.scalar(select(PitcherSnapshot).where(
-                        PitcherSnapshot.pitcher_id == pitcher_id,
-                        PitcherSnapshot.season == season,
-                        PitcherSnapshot.captured_date == captured,
-                    )) or PitcherSnapshot(
-                        pitcher_id=pitcher_id, season=season, captured_date=captured
-                    )
-                    snap.pitcher_name = name
-                    snap.era = to_float(stats.get("era"))
-                    snap.whip = to_float(stats.get("whip"))
-                    snap.strikeouts_per_9 = to_float(stats.get("strikeoutsPer9Inn"))
-                    snap.walks_per_9 = to_float(stats.get("walksPer9Inn"))
-                    snap.innings_pitched = to_float(stats.get("inningsPitched"))
-                    snap.raw = stats
-                    db.add(snap)
-                    db.commit()
-                    pitcher_count += 1
-            details = {"games": len(schedule), "teams": len(standings), "pitchers": pitcher_count}
-            self._finish_run(run_id, "success", details)
-            return details
-        except Exception as exc:
-            self._finish_run(run_id, "failed", {}, str(exc))
-            raise
-
-    async def refresh_odds(self) -> dict:
-        run_id = self._start_run("odds")
-        try:
-            events, usage = await self.odds.fetch_mlb_odds()
-            rows = self.odds.normalize(events)
-            with SessionLocal() as db:
-                for event in events:
-                    game = db.scalar(select(Game).where(Game.external_id == event["id"])) or Game(external_id=event["id"])
-                    game.home_team = event["home_team"]
-                    game.away_team = event["away_team"]
-                    game.starts_at = parse_dt(event["commence_time"]) or datetime.now(timezone.utc)
-                    game.status = "scheduled"
-                    stadium = STADIUMS.get(game.home_team, {})
-                    game.venue_name = stadium.get("venue", "")
-                    db.add(game)
-                for row in rows:
-                    db.add(OddsSnapshot(
-                        game_external_id=row["game_external_id"],
-                        bookmaker=row["bookmaker"],
-                        market=row["market"],
-                        selection=row["selection"],
-                        american_odds=row["american_odds"],
-                        line=row["line"],
-                        bookmaker_updated_at=parse_dt(row["bookmaker_updated_at"]),
-                        captured_at=row["captured_at"],
-                    ))
-                db.commit()
-            details = {"events": len(events), "outcomes": len(rows), "quota": usage}
-            self._finish_run(run_id, "success", details)
-            return details
-        except Exception as exc:
-            self._finish_run(run_id, "failed", {}, str(exc))
-            raise
-
-    async def refresh_weather(self) -> dict:
-        run_id = self._start_run("weather")
-        saved = 0
-        try:
-            with SessionLocal() as db:
-                games = list(db.scalars(select(Game).where(Game.starts_at >= datetime.now(timezone.utc))).all())
-            for game in games:
-                stadium = STADIUMS.get(game.home_team)
-                if not stadium or stadium.get("roof"):
-                    continue
-                periods = await self.weather.hourly_forecast(stadium["lat"], stadium["lon"])
-                period = self.weather.closest_period(periods, game.starts_at)
-                if not period:
-                    continue
-                with SessionLocal() as db:
-                    db.add(WeatherSnapshot(
-                        game_external_id=game.external_id,
-                        forecast_time=parse_dt(period.get("startTime")),
-                        temperature_f=to_float(period.get("temperature")),
-                        wind_speed_mph=parse_wind_speed(period.get("windSpeed")),
-                        wind_direction=period.get("windDirection", ""),
-                        precipitation_probability=to_float(
-                            (period.get("probabilityOfPrecipitation") or {}).get("value")
-                        ),
-                        short_forecast=period.get("shortForecast", ""),
-                    ))
-                    db.commit()
-                    saved += 1
-            details = {"forecasts": saved}
-            self._finish_run(run_id, "success", details)
-            return details
-        except Exception as exc:
-            self._finish_run(run_id, "failed", {}, str(exc))
-            raise
-
-    def rebuild_card(self) -> dict:
-        with SessionLocal() as db:
-            db.execute(delete(Pick).where(Pick.status == "pending"))
-            games = list(db.scalars(select(Game).where(Game.starts_at >= datetime.now(timezone.utc))).all())
-            created = 0
-            for game in games:
-                latest_time = db.scalar(select(OddsSnapshot.captured_at).where(
-                    OddsSnapshot.game_external_id == game.external_id,
-                    OddsSnapshot.market == "h2h",
-                ).order_by(OddsSnapshot.captured_at.desc()).limit(1))
-                if not latest_time:
-                    continue
-                odds = list(db.scalars(select(OddsSnapshot).where(
-                    OddsSnapshot.game_external_id == game.external_id,
-                    OddsSnapshot.market == "h2h",
-                    OddsSnapshot.captured_at == latest_time,
-                )).all())
-                by_book = defaultdict(list)
-                for odd in odds:
-                    by_book[odd.bookmaker].append(odd)
-
-                season, captured = date.today().year, date.today().isoformat()
-                home_team = db.scalar(select(TeamSnapshot).where(
-                    TeamSnapshot.team_id == game.home_team_id,
-                    TeamSnapshot.season == season,
-                    TeamSnapshot.captured_date == captured,
-                )) if game.home_team_id else None
-                away_team = db.scalar(select(TeamSnapshot).where(
-                    TeamSnapshot.team_id == game.away_team_id,
-                    TeamSnapshot.season == season,
-                    TeamSnapshot.captured_date == captured,
-                )) if game.away_team_id else None
-                home_pitcher = db.scalar(select(PitcherSnapshot).where(
-                    PitcherSnapshot.pitcher_id == game.home_probable_pitcher_id,
-                    PitcherSnapshot.season == season,
-                    PitcherSnapshot.captured_date == captured,
-                )) if game.home_probable_pitcher_id else None
-                away_pitcher = db.scalar(select(PitcherSnapshot).where(
-                    PitcherSnapshot.pitcher_id == game.away_probable_pitcher_id,
-                    PitcherSnapshot.season == season,
-                    PitcherSnapshot.captured_date == captured,
-                )) if game.away_probable_pitcher_id else None
-
-                for bookmaker, outcomes in by_book.items():
-                    home_outcome = next((x for x in outcomes if x.selection == game.home_team), None)
-                    away_outcome = next((x for x in outcomes if x.selection == game.away_team), None)
-                    if not home_outcome or not away_outcome:
-                        continue
-                    nv_home, nv_away = no_vig_probabilities(
-                        [home_outcome.american_odds, away_outcome.american_odds]
-                    )
-                    home_model, factors = projected_home_probability(
-                        home_team, away_team, home_pitcher, away_pitcher, nv_home
-                    )
-                    candidates = [
-                        (home_outcome, home_model, nv_home),
-                        (away_outcome, 1 - home_model, nv_away),
-                    ]
-                    for outcome, model_prob, market_prob in candidates:
-                        metrics = evaluate_moneyline(
-                            outcome.selection, outcome.american_odds, model_prob, market_prob
-                        )
-                        if metrics["edge_percent"] < 1.5 or metrics["expected_value_percent"] < 1.0:
-                            continue
-                        db.add(Pick(
-                            sport="MLB",
-                            game_id=game.external_id,
-                            matchup=f"{game.away_team} @ {game.home_team}",
-                            market="moneyline",
-                            selection=outcome.selection,
-                            sportsbook=bookmaker.title(),
-                            american_odds=outcome.american_odds,
-                            model_probability=model_prob,
-                            market_probability=market_prob,
-                            starts_at=game.starts_at,
-                            status="pending",
-                            explanation=(
-                                f"Market-aware projection. Team rating difference {factors['team_diff']:+.2f}; "
-                                f"starting-pitcher difference {factors['pitcher_diff']:+.2f}; "
-                                "probabilities are blended with no-vig market consensus to reduce overconfidence."
-                            ),
-                            **metrics,
-                        ))
-                        created += 1
+    async def refresh(self, db: Session, *, force_official: bool = False, triggered_by: str = "system") -> dict[str, Any]:
+        async with _PROCESS_LOCK:
+            if not self._try_database_lock(db):
+                return {"status": "skipped", "reason": "Another refresh is already running"}
+            operation = OperationLog(operation="refresh", status="running", triggered_by=triggered_by)
+            db.add(operation)
             db.commit()
-        return {"picks": created}
-
-    def _start_run(self, job_name: str) -> int:
-        with SessionLocal() as db:
-            run = RefreshRun(job_name=job_name, status="running")
-            db.add(run)
-            db.commit()
-            db.refresh(run)
-            return run.id
-
-    def _finish_run(self, run_id: int, status: str, details: dict, error: str = "") -> None:
-        with SessionLocal() as db:
-            run = db.get(RefreshRun, run_id)
-            if run:
-                run.status = status
-                run.details = details
-                run.error_message = error
-                run.finished_at = datetime.now(timezone.utc)
+            started = perf_counter()
+            try:
+                result = await self._refresh_inner(db, force_official=force_official)
+                result["duration_ms"] = round((perf_counter() - started) * 1000)
+                operation.status = "success"
+                operation.summary_json = result
+                operation.finished_at = datetime.now(timezone.utc)
                 db.commit()
+                return result
+            except Exception as exc:
+                db.rollback()
+                operation = db.get(OperationLog, operation.id)
+                if operation:
+                    category, friendly = self._classify_error(exc)
+                    operation.status = "failed"
+                    operation.summary_json = {
+                        "category": category,
+                        "duration_ms": round((perf_counter() - started) * 1000),
+                    }
+                    operation.error_text = friendly
+                    operation.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+                raise
+            finally:
+                self._release_database_lock(db)
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> tuple[str, str]:
+        message = str(exc).lower()
+        if isinstance(exc, IntegrityError) or "duplicate key" in message or "unique constraint" in message:
+            return "database_conflict", "A duplicate database record was detected and rolled back safely."
+        if "timeout" in message:
+            return "provider_timeout", "A data provider timed out. EdgeBoard will retry automatically."
+        if "401" in message or "403" in message or "api key" in message:
+            return "authentication", "A provider credential was rejected. Check the Render environment variables."
+        if "429" in message or "quota" in message or "rate limit" in message:
+            return "rate_limit", "A provider usage limit was reached. The next refresh will try again."
+        if "connection" in message or "network" in message or "dns" in message:
+            return "network", "A provider connection failed. EdgeBoard will retry automatically."
+        return "unknown", "The refresh failed unexpectedly. Technical details remain in the server logs."
+
+    async def _refresh_inner(self, db: Session, *, force_official: bool) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        today = now.astimezone(_ET).date()
+        season = today.year
+        errors: list[str] = []
+        try:
+            schedule = await self.mlb.schedule(today - timedelta(days=10), today + timedelta(days=2))
+        except Exception as exc:
+            schedule = []
+            errors.append(f"MLB schedule: {exc}")
+        try:
+            odds_events = await self.odds.fetch_mlb_odds()
+        except Exception as exc:
+            odds_events = []
+            errors.append(f"Odds API: {exc}")
+        if not odds_events and settings.demo_mode:
+            odds_events = self._demo_events(schedule, now)
+
+        schedule_map = self._schedule_map(schedule)
+        odds_rows = self.odds.flatten(odds_events)
+
+        self._upsert_games(db, odds_events, schedule_map, now)
+        self._update_past_scores(db, schedule)
+        self._insert_quotes(db, odds_rows)
+        db.commit()
+
+        grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in odds_rows:
+            commence = datetime.fromisoformat(row["commence_time"].replace("Z", "+00:00"))
+            key = game_key(
+                commence.astimezone(_ET).date(),
+                canonical_team(row["away_team"]),
+                canonical_team(row["home_team"]),
+            )
+            grouped_rows[key].append(row)
+
+        if force_official:
+            for prior in db.scalars(
+                select(Recommendation).where(
+                    Recommendation.card_date == today,
+                    Recommendation.is_official.is_(True),
+                    Recommendation.result.is_(None),
+                )
+            ).all():
+                prior.is_official = False
+            db.flush()
+        db.execute(
+            delete(Recommendation).where(
+                Recommendation.card_date == today,
+                Recommendation.is_official.is_(False),
+            )
+        )
+        db.commit()
+
+        candidates_created = 0
+        projections_created = 0
+        for game_id, rows in grouped_rows.items():
+            game = db.get(Game, game_id)
+            if not game or game.game_date != today:
+                continue
+            market_candidates = self._best_candidates(rows)
+            if not market_candidates:
+                continue
+            market_home = self._market_home_probability(rows, game.home_team)
+            meta = schedule_map.get(game_id, {})
+            park_name, lat, lon, park_factor = PARKS.get(
+                game.home_team,
+                (game.venue or "Unknown", game.latitude, game.longitude, 1.0),
+            )
+            game.venue = park_name
+            game.latitude = lat
+            game.longitude = lon
+            away_team, home_team, away_recent, home_recent, away_pitcher, home_pitcher, weather = await asyncio.gather(
+                self.mlb.team_stats(game.away_team_id, season),
+                self.mlb.team_stats(game.home_team_id, season),
+                self.mlb.team_recent_stats(game.away_team_id, today - timedelta(days=14), today - timedelta(days=1)),
+                self.mlb.team_recent_stats(game.home_team_id, today - timedelta(days=14), today - timedelta(days=1)),
+                self.mlb.pitcher_stats(game.away_pitcher_id, season),
+                self.mlb.pitcher_stats(game.home_pitcher_id, season),
+                self.weather.forecast_for(lat, lon, game.commence_time),
+            )
+            away_rest, home_rest = self._rest_days(schedule, game)
+            projection_result = self.engine.project_game(
+                game_id=game.id,
+                away_team_name=game.away_team,
+                home_team_name=game.home_team,
+                away_team=away_team,
+                home_team=home_team,
+                away_recent=away_recent,
+                home_recent=home_recent,
+                away_pitcher=away_pitcher,
+                home_pitcher=home_pitcher,
+                weather=weather,
+                park_factor=park_factor,
+                away_rest_days=away_rest,
+                home_rest_days=home_rest,
+                market_home_probability=market_home,
+                candidates=market_candidates,
+            )
+            projection = Projection(
+                game_id=game.id,
+                model_version=settings.model_version,
+                generated_at=now,
+                away_runs=projection_result.away_runs,
+                home_runs=projection_result.home_runs,
+                away_win_probability=projection_result.away_win_probability,
+                home_win_probability=projection_result.home_win_probability,
+                total_mean=projection_result.total_mean,
+                data_quality=projection_result.data_quality,
+                confidence=projection_result.confidence,
+                market_disagreement=projection_result.market_disagreement,
+                simulation_count=projection_result.simulations,
+                reasons_json=projection_result.reasons,
+                inputs_json=projection_result.inputs,
+                probabilities_json=projection_result.probabilities,
+            )
+            db.add(projection)
+            db.flush()
+            projections_created += 1
+
+            policy = get_policy(db)
+            for candidate in market_candidates:
+                key = self.engine.candidate_key(candidate["market"], candidate["selection"], candidate.get("line"))
+                model_probability = projection_result.probabilities.get(key)
+                if model_probability is None:
+                    continue
+                evaluation = self.engine.evaluate_candidate(
+                    model_probability=model_probability,
+                    market_probability=candidate["market_probability"],
+                    odds=candidate["price"],
+                    confidence=projection_result.confidence,
+                    data_quality=projection_result.data_quality,
+                    policy=policy,
+                    force=force_official,
+                )
+                recommendation = Recommendation(
+                    game_id=game.id,
+                    projection_id=projection.id,
+                    card_date=today,
+                    market=candidate["market"],
+                    selection=candidate["selection"],
+                    line=candidate.get("line"),
+                    bookmaker=candidate["bookmaker"],
+                    price=candidate["price"],
+                    model_probability=model_probability,
+                    market_probability=candidate["market_probability"],
+                    fair_odds=evaluation["fair_odds"],
+                    edge=evaluation["edge"],
+                    expected_value=evaluation["expected_value"],
+                    confidence=projection_result.confidence,
+                    data_quality=projection_result.data_quality,
+                    score=evaluation["score"],
+                    grade=evaluation["grade"],
+                    units=evaluation["units"],
+                    is_official=False,
+                    reasons_json=[
+                        f"Best tracked price: {candidate['bookmaker']} at {candidate['price']:+d}.",
+                        f"Break-even probability is {american_to_implied(candidate['price']) * 100:.1f}%; the model projects {model_probability * 100:.1f}%.",
+                        f"Model edge versus the no-vig market is {evaluation['edge'] * 100:.1f} percentage points with {evaluation['expected_value'] * 100:.1f}% estimated EV.",
+                        *(projection_result.reasons[:3]),
+                        "Risk: probable pitchers, confirmed lineups, bullpen availability, injuries, weather, and price movement can change the projection before first pitch.",
+                    ],
+                )
+                db.add(recommendation)
+                candidates_created += 1
+            game.metadata_json = {
+                **(game.metadata_json or {}),
+                "umpire": meta.get("umpire"),
+                "weather": weather,
+                "park_factor": park_factor,
+                "rest": {"away": away_rest, "home": home_rest},
+            }
+            db.commit()
+
+        official_created = self._select_official_card(db, today, force_official)
+        grading = grade_official_picks(db)
+        return {
+            "status": "ok",
+            "games": len(grouped_rows),
+            "projections": projections_created,
+            "candidates": candidates_created,
+            "official_created": official_created,
+            "graded": grading["graded"],
+            "errors": errors,
+            "refreshed_at": now.isoformat(),
+        }
+
+    def _upsert_games(
+        self,
+        db: Session,
+        events: list[dict[str, Any]],
+        schedule_map: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> None:
+        for event in events:
+            commence = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
+            game_date = commence.astimezone(_ET).date()
+            away = canonical_team(event["away_team"])
+            home = canonical_team(event["home_team"])
+            key = game_key(game_date, away, home)
+            league = schedule_map.get(key, {})
+            venue, lat, lon, _ = PARKS.get(home, (league.get("venue"), None, None, 1.0))
+            game = db.get(Game, key)
+            if not game:
+                game = Game(
+                    id=key,
+                    sport="mlb",
+                    game_date=game_date,
+                    commence_time=commence,
+                    away_team=away,
+                    home_team=home,
+                )
+                db.add(game)
+            game.commence_time = commence
+            game.provider_game_id = event.get("id")
+            game.league_game_id = league.get("game_pk")
+            game.away_team_id = league.get("away_team_id")
+            game.home_team_id = league.get("home_team_id")
+            game.away_pitcher = league.get("away_pitcher")
+            game.home_pitcher = league.get("home_pitcher")
+            game.away_pitcher_id = league.get("away_pitcher_id")
+            game.home_pitcher_id = league.get("home_pitcher_id")
+            game.venue = venue
+            game.latitude = lat
+            game.longitude = lon
+            game.status = league.get("status", game.status)
+            game.away_score = league.get("away_score")
+            game.home_score = league.get("home_score")
+            game.updated_at = now
+
+    def _insert_quotes(self, db: Session, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        game_ids = set()
+        normalized: list[tuple[dict[str, Any], str]] = []
+        for row in rows:
+            commence = datetime.fromisoformat(row["commence_time"].replace("Z", "+00:00"))
+            key = game_key(
+                commence.astimezone(_ET).date(),
+                canonical_team(row["away_team"]),
+                canonical_team(row["home_team"]),
+            )
+            if db.get(Game, key):
+                game_ids.add(key)
+                normalized.append((row, key))
+
+        existing = {
+            (q.game_id, q.bookmaker, q.market, q.selection, q.line, q.price, q.fetched_at)
+            for q in db.scalars(select(Quote).where(Quote.game_id.in_(game_ids))).all()
+        } if game_ids else set()
+
+        for row, key in normalized:
+            selection = canonical_team(row["selection"]) if row["market"] != "totals" else row["selection"]
+            quote_key = (
+                key, row["bookmaker"], row["market"], selection,
+                row.get("line"), row["price"], row["fetched_at"],
+            )
+            if quote_key in existing:
+                continue
+            existing.add(quote_key)
+            db.add(Quote(
+                game_id=key,
+                bookmaker=row["bookmaker"],
+                market=row["market"],
+                selection=selection,
+                line=row.get("line"),
+                price=row["price"],
+                implied_probability=row["implied_probability"],
+                fetched_at=row["fetched_at"],
+            ))
+
+    def _update_past_scores(self, db: Session, schedule: list[dict[str, Any]]) -> None:
+        for item in schedule:
+            if not item.get("away_team") or not item.get("home_team") or not item.get("game_date"):
+                continue
+            commence = datetime.fromisoformat(item["game_date"].replace("Z", "+00:00"))
+            key = game_key(
+                commence.astimezone(_ET).date(),
+                canonical_team(item["away_team"]),
+                canonical_team(item["home_team"]),
+            )
+            game = db.get(Game, key)
+            if game:
+                game.status = item.get("status", game.status)
+                game.away_score = item.get("away_score")
+                game.home_score = item.get("home_score")
+
+    def _schedule_map(self, schedule: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        output = {}
+        for item in schedule:
+            if not item.get("away_team") or not item.get("home_team") or not item.get("game_date"):
+                continue
+            commence = datetime.fromisoformat(item["game_date"].replace("Z", "+00:00"))
+            key = game_key(
+                commence.astimezone(_ET).date(),
+                canonical_team(item["away_team"]),
+                canonical_team(item["home_team"]),
+            )
+            output[key] = item
+        return output
+
+    def _rest_days(self, schedule: list[dict[str, Any]], game: Game) -> tuple[int, int]:
+        previous: dict[str, date] = {}
+        for item in schedule:
+            if not item.get("game_date"):
+                continue
+            day = datetime.fromisoformat(item["game_date"].replace("Z", "+00:00")).astimezone(_ET).date()
+            if day >= game.game_date:
+                continue
+            for team in (canonical_team(item.get("away_team")), canonical_team(item.get("home_team"))):
+                if team in {game.away_team, game.home_team} and (team not in previous or day > previous[team]):
+                    previous[team] = day
+        away_rest = (game.game_date - previous[game.away_team]).days - 1 if game.away_team in previous else 2
+        home_rest = (game.game_date - previous[game.home_team]).days - 1 if game.home_team in previous else 2
+        return max(away_rest, 0), max(home_rest, 0)
+
+    def _market_home_probability(self, rows: list[dict[str, Any]], home_team: str) -> float | None:
+        values = []
+        by_book: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            if row["market"] == "h2h":
+                by_book[row["bookmaker"]].append(row)
+        for book_rows in by_book.values():
+            if len(book_rows) < 2:
+                continue
+            implied = [item["implied_probability"] for item in book_rows[:2]]
+            fair = no_vig_probabilities(implied)
+            for item, probability in zip(book_rows[:2], fair, strict=False):
+                if canonical_team(item["selection"]) == home_team:
+                    values.append(probability)
+        return sum(values) / len(values) if values else None
+
+    def _best_candidates(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        canonical_rows = []
+        for row in rows:
+            canonical_rows.append(
+                {
+                    **row,
+                    "selection": canonical_team(row["selection"]) if row["market"] != "totals" else row["selection"],
+                }
+            )
+        pair_probabilities: dict[tuple[str, str, float | None], list[float]] = defaultdict(list)
+        by_pair: dict[tuple[str, str, float | None], list[dict[str, Any]]] = defaultdict(list)
+        for row in canonical_rows:
+            pair_line = None if row["market"] == "h2h" else abs(float(row["line"])) if row["market"] == "spreads" and row["line"] is not None else row["line"]
+            by_pair[(row["bookmaker"], row["market"], pair_line)].append(row)
+        for pair_rows in by_pair.values():
+            if len(pair_rows) < 2:
+                continue
+            fair = no_vig_probabilities([item["implied_probability"] for item in pair_rows])
+            for item, probability in zip(pair_rows, fair, strict=False):
+                pair_probabilities[(item["market"], item["selection"], item.get("line"))].append(probability)
+
+        best: dict[tuple[str, str, float | None], dict[str, Any]] = {}
+        for row in canonical_rows:
+            key = (row["market"], row["selection"], row.get("line"))
+            if key not in best or row["price"] > best[key]["price"]:
+                best[key] = row
+        output = []
+        for key, row in best.items():
+            probabilities = pair_probabilities.get(key, [])
+            market_probability = sum(probabilities) / len(probabilities) if probabilities else row["implied_probability"]
+            output.append({**row, "market_probability": market_probability})
+        return output
+
+    def _select_official_card(self, db: Session, card_date: date, force: bool) -> int:
+        existing = db.scalars(
+            select(Recommendation).where(
+                Recommendation.card_date == card_date,
+                Recommendation.is_official.is_(True),
+            )
+        ).all()
+        if existing and not force:
+            return 0
+        if force:
+            for pick in existing:
+                if pick.result is None:
+                    pick.is_official = False
+            db.commit()
+        policy = get_policy(db)
+        candidates = db.scalars(
+            select(Recommendation)
+            .where(
+                Recommendation.card_date == card_date,
+                Recommendation.is_official.is_(False),
+                Recommendation.units > 0,
+            )
+            .order_by(desc(Recommendation.score), desc(Recommendation.expected_value), desc(Recommendation.edge))
+        ).all()
+        selected_games: set[str] = set()
+        total_units = 0.0
+        created = 0
+        max_picks = min(policy.max_official_picks, settings.max_official_picks)
+        for candidate in candidates:
+            if candidate.game_id in selected_games:
+                continue
+            if total_units + candidate.units > policy.max_daily_units:
+                continue
+            candidate.is_official = True
+            selected_games.add(candidate.game_id)
+            total_units += candidate.units
+            created += 1
+            if created >= max_picks:
+                break
+        db.commit()
+        return created
+
+    def _demo_events(self, schedule: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+        upcoming = []
+        for item in schedule:
+            if not item.get("game_date") or not item.get("away_team") or not item.get("home_team"):
+                continue
+            commence = datetime.fromisoformat(item["game_date"].replace("Z", "+00:00"))
+            if commence > now:
+                upcoming.append(item)
+        events = []
+        for index, item in enumerate(upcoming[:4]):
+            away = canonical_team(item["away_team"])
+            home = canonical_team(item["home_team"])
+            commence = item["game_date"]
+            home_price = -118 + index * 7
+            away_price = 105 - index * 4
+            total = 8.0 + 0.5 * (index % 3)
+            event = {
+                "id": f"demo-{item.get('game_pk', index)}",
+                "commence_time": commence,
+                "away_team": away,
+                "home_team": home,
+                "bookmakers": [],
+            }
+            for book in ("fanduel", "draftkings"):
+                shift = 3 if book == "fanduel" else 0
+                event["bookmakers"].append(
+                    {
+                        "key": book,
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": away, "price": away_price + shift},
+                                    {"name": home, "price": home_price + shift},
+                                ],
+                            },
+                            {
+                                "key": "spreads",
+                                "outcomes": [
+                                    {"name": away, "price": -110 + shift, "point": 1.5},
+                                    {"name": home, "price": -110, "point": -1.5},
+                                ],
+                            },
+                            {
+                                "key": "totals",
+                                "outcomes": [
+                                    {"name": "Over", "price": -108 + shift, "point": total},
+                                    {"name": "Under", "price": -112, "point": total},
+                                ],
+                            },
+                        ],
+                    }
+                )
+            events.append(event)
+        return events

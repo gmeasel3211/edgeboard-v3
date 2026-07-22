@@ -1,53 +1,106 @@
-# EdgeBoard v3 — Milestone 2
+# EdgeBoard v3
 
-Milestone 2 turns the deployable SaaS foundation into a live MLB data platform.
+EdgeBoard is a subscription-ready sports analytics platform. This repository contains a production-oriented MLB launch module with a FastAPI API, a Next.js App Router frontend, PostgreSQL persistence, Stripe subscriptions, secure cookie authentication, automated model refreshes, official-pick tracking, grading, ROI/CLV reporting, and an admin operations center.
 
-## Added in this milestone
+## What is included
 
-- The Odds API v4 integration
-- FanDuel and DraftKings filtering
-- Moneyline, spread, and total snapshots
-- Persistent historical odds storage
-- MLB schedule, standings, probable pitchers, scores, and season pitching statistics
-- National Weather Service hourly forecasts for outdoor parks
-- MLB stadium coordinates, roof status, and baseline park factors
-- Automated refresh pipeline
-- APScheduler refresh loop
-- Market-aware moneyline projection
-- No-vig probability calculation
-- Edge, EV, confidence, and fractional Kelly sizing
-- Subscriber game board
-- Game-detail pages
-- Live pipeline status
-- Administrator refresh center
+- Public marketing site, pricing page, model record, and free-pick endpoint
+- Member registration, login, refresh-token rotation, email verification hooks, and password reset hooks
+- Free, Pro, and Elite entitlement tiers
+- Stripe Checkout, Customer Portal, and signed webhook processing
+- MLB schedule, team/pitcher statistics, FanDuel/DraftKings odds, weather, and park inputs
+- Hybrid projection engine with market anchoring and Monte Carlo simulation
+- Moneyline, run-line, and total evaluation
+- Frozen official cards, bet grading, units, ROI, and closing-line value
+- Premium dashboard, game pages, history/performance center, and admin center
+- Render Blueprint, Dockerfiles, Docker Compose, Alembic migrations, and tests
+- Sport-module architecture designed for later NFL/NBA expansion
 
-## Important limitation
+## Important limits
 
-This milestone creates a real data and modeling pipeline, but it is not yet a validated betting model.
-Do not market projections as guaranteed or proven. Milestone 3 will add calibration, backtesting,
-bet grading, closing-line tracking, expanded markets, and performance analytics.
+This release uses sources that can be obtained reliably from the configured APIs. Umpire assignments, verified injury impact, public betting percentages, and sharp/steam feeds are represented as extension points rather than fabricated data. Add a licensed provider before exposing those labels to paying customers.
 
-## Update an existing Milestone 1 repository
+## Repository layout
 
-Replace the old repository files with the contents of this package, or copy these files over the
-existing project and allow matching files to be overwritten. Commit and push to `main`.
-Render will redeploy automatically from the updated `render.yaml`.
+```text
+apps/api   FastAPI + SQLAlchemy + Stripe + MLB model
+apps/web   Next.js 16 App Router frontend
+render.yaml
+```
 
-## Required Render environment variables
+## Local setup
 
-- `ADMIN_EMAIL`
-- `ODDS_API_KEY`
-- `NWS_USER_AGENT` — example: `EdgeBoard/3.1 (you@example.com)`
+1. Copy `.env.example` to `.env` and replace every placeholder.
+2. Install Docker Desktop.
+3. Run:
 
-Stripe variables can remain blank until billing is configured.
+```bash
+docker compose up --build
+```
 
-## First live refresh
+4. Open `http://localhost:3000`.
+5. API docs are at `http://localhost:8000/docs` in development.
 
-After deployment:
+Create the first admin account:
 
-1. Register using `ADMIN_EMAIL`.
-2. Visit `/admin`.
-3. Click **Full refresh**.
-4. Visit `/live-odds` and `/games`.
+```bash
+docker compose exec api python -m app.seed
+```
 
-The scheduled refresh then runs every 10 minutes while the API service is awake.
+Refresh model data manually:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/admin/refresh \
+  -H "X-Cron-Secret: replace-me"
+```
+
+## Stripe setup
+
+Create recurring Stripe Prices for Pro and Elite, then set:
+
+```text
+STRIPE_PRICE_PRO_MONTHLY
+STRIPE_PRICE_ELITE_MONTHLY
+```
+
+Register this webhook endpoint:
+
+```text
+https://YOUR_API_DOMAIN/api/v1/webhooks/stripe
+```
+
+Listen for at least:
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `invoice.paid`
+- `invoice.payment_failed`
+
+Use Stripe test mode until access provisioning, cancellations, failed payments, and portal changes are verified end-to-end.
+
+## Render deployment
+
+The included `render.yaml` defines:
+
+- `edgeboard-api` web service
+- `edgeboard-web` Next.js web service
+- `edgeboard-refresh` cron job
+- `edgeboard-grade` cron job
+- PostgreSQL database
+
+In Render, create a new Blueprint from this repository. Fill all environment variables marked `sync: false`.
+
+## Before charging customers
+
+- Rotate any API key that has ever been committed publicly.
+- Put the product behind your own domain and HTTPS.
+- Complete Terms, Privacy, Refund, Responsible Gambling, and jurisdiction review with qualified counsel.
+- Add transactional email, uptime monitoring, error tracking, database backups, and a support workflow.
+- Run the model in shadow mode and publish an independently auditable record before marketing performance claims.
+- Never imply guaranteed profit.
+
+## License
+
+All rights reserved. See `LICENSE.md`.

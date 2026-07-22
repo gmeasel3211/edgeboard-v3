@@ -1,41 +1,49 @@
-# EdgeBoard Milestone 2 — Update Instructions
+# Start here
 
-## Upload
+This package is a complete replacement project. Do not copy individual files into the old `edgeboard_mlb_production` directory.
 
-This package replaces Milestone 1.
+## Safest GitHub method
 
-1. Extract the ZIP.
-2. Open the extracted `edgeboard-v3-milestone-2` folder.
-3. Copy everything inside it into your local `edgeboard-v3` repository.
-4. Choose **replace files** when Windows asks.
-5. Commit and push all changes to GitHub.
+Use GitHub Desktop so the folder structure stays intact.
 
-Do not upload the ZIP itself.
-
-## Render variables
-
-Add these to the `edgeboard-api` service:
+1. Install and open GitHub Desktop.
+2. Choose **File → Clone repository**.
+3. Select `gmeasel3211/edgeboard-mlb` and clone it.
+4. Open the cloned repository folder from GitHub Desktop.
+5. Delete the old project files inside that local folder. Do not delete the hidden `.git` folder.
+6. Copy **the contents of this `edgeboard-v3` folder** into the cloned repository folder. At the repository root, you should now see:
 
 ```text
-ODDS_API_KEY=your-key
-NWS_USER_AGENT=EdgeBoard/3.1 (your-email@example.com)
+apps/
+docs/
+scripts/
+render.yaml
+docker-compose.yml
+README.md
 ```
 
-Your existing `ADMIN_EMAIL` remains required.
+7. In GitHub Desktop, enter the summary `Replace project with EdgeBoard v3 commercial foundation`.
+8. Click **Commit to main**.
+9. Click **Push origin**.
 
-## Verify deployment
+## Deploy
 
-- API health: `/health`
-- Pipeline status: `/api/v1/system/status`
-- Frontend game board: `/games`
-- Frontend status: `/live-odds`
-- Admin operations: `/admin`
+The new project is a monorepo and no longer uses `edgeboard_mlb_production` as Render's root directory.
 
-## Generate the first live card
+The cleanest deployment is:
 
-Register or log in with the administrator email, open `/admin`, and click **Full refresh**.
+1. In Render, create a **New Blueprint**.
+2. Select the `edgeboard-mlb` repository.
+3. Render will detect the root `render.yaml`.
+4. Supply every secret value Render asks for.
+5. After the database and API deploy, run this once from the API shell:
 
-## Data policy
+```bash
+python -m app.seed
+```
 
-The code stores every fetched line snapshot. Ensure your commercial use complies with the
-terms and licensing of every data provider and sportsbook data source.
+6. Set `NEXT_PUBLIC_API_URL` to the public API URL.
+7. Set the API's `FRONTEND_URL` and `CORS_ORIGINS` to the public web URL.
+8. Redeploy both services.
+
+Do not reuse an Odds API key that was previously committed to a public repository. Rotate it first.

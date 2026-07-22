@@ -1,72 +1,126 @@
 databases:
-  - name: edgeboard-db
-    plan: free
+  - name: edgeboard-postgres
+    plan: basic-256mb
+    region: ohio
+    postgresMajorVersion: "17"
     databaseName: edgeboard
     user: edgeboard
+    connectionPool: pgbouncer
 
 services:
   - type: web
     name: edgeboard-api
-    runtime: python
-    plan: free
+    runtime: docker
+    region: ohio
+    plan: starter
     rootDir: apps/api
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.bootstrap && uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    preDeployCommand: alembic upgrade head
+    autoDeployTrigger: checksPass
     envVars:
-      - key: APP_ENV
+      - key: ENVIRONMENT
         value: production
-      - key: PYTHON_VERSION
-        value: 3.12.4
-      - key: SECRET_KEY
-        generateValue: true
       - key: DATABASE_URL
         fromDatabase:
-          name: edgeboard-db
-          property: connectionString
-      - key: CORS_ORIGINS
-        value: https://edgeboard-web.onrender.com
+          name: edgeboard-postgres
+          property: connectionPoolString
       - key: FRONTEND_URL
-        value: https://edgeboard-web.onrender.com
-      - key: ADMIN_EMAIL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: REFRESH_TOKEN_PEPPER
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: COOKIE_DOMAIN
         sync: false
       - key: ODDS_API_KEY
         sync: false
-      - key: ODDS_REGIONS
-        value: us
-      - key: ODDS_BOOKMAKERS
-        value: fanduel,draftkings
-      - key: ODDS_MARKETS
-        value: h2h,spreads,totals
-      - key: MLB_STATS_BASE_URL
-        value: https://statsapi.mlb.com/api
-      - key: NWS_BASE_URL
-        value: https://api.weather.gov
-      - key: NWS_USER_AGENT
-        sync: false
-      - key: AUTO_REFRESH_ENABLED
-        value: true
-      - key: ODDS_REFRESH_MINUTES
-        value: 10
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRO_PRICE_ID
+      - key: STRIPE_PRICE_PRO_MONTHLY
         sync: false
-      - key: STRIPE_ELITE_PRICE_ID
+      - key: STRIPE_PRICE_ELITE_MONTHLY
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: CRON_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DEMO_MODE
+        value: "false"
 
   - type: web
     name: edgeboard-web
     runtime: node
-    plan: free
+    region: ohio
+    plan: starter
     rootDir: apps/web
     buildCommand: npm install && npm run build
-    startCommand: npm run start -- -p $PORT
+    startCommand: npm run start
     healthCheckPath: /
+    autoDeployTrigger: checksPass
     envVars:
       - key: NODE_VERSION
-        value: 20.15.1
+        value: 22.15.0
       - key: NEXT_PUBLIC_API_URL
-        value: https://edgeboard-api.onrender.com
+        sync: false
+      - key: INTERNAL_API_URL
+        fromService:
+          type: web
+          name: edgeboard-api
+          property: hostport
+
+  - type: cron
+    name: edgeboard-refresh
+    runtime: docker
+    region: ohio
+    plan: starter
+    rootDir: apps/api
+    dockerfilePath: ./Dockerfile
+    schedule: "*/30 * * * *"
+    dockerCommand: python -m app.jobs.refresh
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: edgeboard-postgres
+          property: connectionPoolString
+      - key: ODDS_API_KEY
+        sync: false
+      - key: MODEL_VERSION
+        value: 3.0.0
+      - key: DEMO_MODE
+        value: "false"
+
+  - type: cron
+    name: edgeboard-grade
+    runtime: docker
+    region: ohio
+    plan: starter
+    rootDir: apps/api
+    dockerfilePath: ./Dockerfile
+    schedule: "15 */2 * * *"
+    dockerCommand: python -m app.jobs.grade
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: edgeboard-postgres
+          property: connectionPoolString
+      - key: DEMO_MODE
+        value: "false"
